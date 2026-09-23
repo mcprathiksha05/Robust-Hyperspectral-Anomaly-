@@ -1,0 +1,6 @@
+data/raw/*.mat
+data/processed/*.mat
+*.pyc
+__pycache__/
+.ipynb_checkpoints/
+experiments/results/*.log
