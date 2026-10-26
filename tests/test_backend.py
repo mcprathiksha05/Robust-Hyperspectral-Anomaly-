@@ -103,7 +103,7 @@ def test_pca_variance_and_inverse():
 def test_detectors_find_implanted_targets():
     cube, gt = make_scene()
     y = gt.astype(bool)
-    rx = RXDetector().fit(cube)
+    rx = RXDetector(robust=True).fit(cube)
     s = rx.score(cube)
     assert s[y].mean() > 5 * np.median(s)
     pix = cube[10, 10]

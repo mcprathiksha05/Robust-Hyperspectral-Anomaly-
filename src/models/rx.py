@@ -1,147 +1,360 @@
-"""Task 4 - RX (Reed-Xiaoli) anomaly detector.
+"""Global Reed-Xiaoli (RX) anomaly detector.
 
-    from src.models.rx import RXDetector, local_rx
-    rx = RXDetector(robust=True).fit(cube)
-    scores = rx.score(cube)                      # (H, W) Mahalanobis distance
-    contrib = rx.contributions(cube[r, c])       # per-band terms that sum to the score
+Implements standard Global RX and an optional robust variant that iteratively
+reduces the influence of pixels with high Mahalanobis distances during
+background estimation.
 
-Global RX models the background as one Gaussian (mean mu, covariance Sigma) and
-scores each pixel x by  (x - mu)^T Sigma^-1 (x - mu).
-
-``robust=True`` refits mu and Sigma after excluding the most anomalous pixels,
-so targets do not contaminate the background model.
-
-``local_rx`` estimates mu and Sigma separately for every pixel from a ring of
-neighbours (outer window minus a guard window), using integral-image sums so it
-runs in one vectorised pass instead of a Python loop per pixel.
+The robust variant does not use ground-truth target labels.
 """
-from __future__ import annotations
+
+from typing import Literal, Optional
 
 import numpy as np
-from scipy.ndimage import uniform_filter
+from scipy import linalg
 
-from src.utils.validation import (HSIValidationError, check_float, check_int, check_windows,
-                                  validate_cube)
+from src.models.base import BaseDetector
 
 
-class RXDetector:
-    def __init__(self, reg: float = 1e-6, robust: bool = True, robust_fraction: float = 0.01,
-                 robust_iterations: int = 1, max_fit_pixels: int | None = 300_000, random_state: int = 0):
-        self.reg = check_float(reg, "reg", 0)
+class RXDetector(BaseDetector):
+    """Global Reed-Xiaoli anomaly detector.
+
+    Parameters
+    ----------
+    regularization:
+        Relative diagonal covariance regularization.
+    method:
+        Solver: "cholesky", "solve", or "pinv".
+    name:
+        Detector name.
+    reg:
+        Compatibility alias for regularization.
+    robust:
+        If True, iteratively trims high-distance pixels when estimating the
+        background mean and covariance.
+    random_state:
+        Optional seed used for deterministic initialization if subsampling
+        is needed in future implementations. The current implementation is
+        deterministic and does not require randomness.
+    """
+
+    def __init__(
+        self,
+        regularization: float = 1e-6,
+        method: Literal["cholesky", "solve", "pinv"] = "cholesky",
+        name: Optional[str] = "Global-RX",
+        reg: Optional[float] = None,
+        robust: bool = False,
+        random_state: Optional[int] = None,
+    ):
+        super().__init__(name=name)
+
+        if reg is not None:
+            regularization = reg
+
+        if regularization < 0:
+            raise ValueError(
+                "Regularization factor must be non-negative, "
+                f"got {regularization}"
+            )
+
+        if method not in ("cholesky", "solve", "pinv"):
+            raise ValueError(
+                "Method must be 'cholesky', 'solve', or 'pinv', "
+                f"got {method}"
+            )
+
+        self.regularization = float(regularization)
+        self.method = method
         self.robust = bool(robust)
-        self.robust_fraction = check_float(robust_fraction, "robust_fraction", 0, 0.5)
-        self.robust_iterations = check_int(robust_iterations, "robust_iterations", 0, 10)
-        self.max_fit_pixels = max_fit_pixels
         self.random_state = random_state
 
-    def fit(self, cube, mask=None):
-        """Estimate background mean/covariance. ``mask`` = pixels allowed in the fit (e.g. valid_mask)."""
-        cube = validate_cube(cube)
-        x = cube.reshape(-1, cube.shape[2]).astype(np.float64)
-        if mask is not None:
-            x = x[np.asarray(mask, bool).ravel()]
-        if not np.isfinite(x).all():
-            raise HSIValidationError("RX input contains NaN/inf. Run preprocess() first.")
-        if self.max_fit_pixels and x.shape[0] > self.max_fit_pixels:
-            rng = np.random.default_rng(self.random_state)
-            x = x[rng.choice(x.shape[0], self.max_fit_pixels, replace=False)]
-        if x.shape[0] <= x.shape[1]:
-            raise HSIValidationError(
-                f"RX needs more pixels ({x.shape[0]}) than bands ({x.shape[1]}). Apply PCA first.")
-        self._fit_stats(x)
-        iters = self.robust_iterations if self.robust else 0
-        for _ in range(iters):
-            s = self._mahalanobis(x)
-            keep = s <= np.quantile(s, 1 - self.robust_fraction)
-            if keep.sum() > x.shape[1] + 1:
-                self._fit_stats(x[keep])
+        self.mean_: Optional[np.ndarray] = None
+        self.cov_: Optional[np.ndarray] = None
+        self.chol_lower_: Optional[np.ndarray] = None
+        self.cov_inv_: Optional[np.ndarray] = None
+
+    @staticmethod
+    def _estimate_mean_covariance(
+        x: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Estimate the mean and sample covariance of an (N, B) array."""
+        mean = np.mean(x, axis=0)
+        centered = x - mean
+
+        if x.shape[0] > 1:
+            cov = np.atleast_2d(np.cov(centered, rowvar=False, ddof=1))
+        else:
+            cov = np.zeros((x.shape[1], x.shape[1]), dtype=np.float64)
+
+        return mean, cov
+
+    def _regularize_covariance(self, cov: np.ndarray) -> np.ndarray:
+        """Apply scale-aware diagonal regularization."""
+        bands = cov.shape[0]
+        trace = float(np.trace(cov))
+        scale = trace / bands if bands > 0 and trace > 0 else 1.0
+
+        cov_reg = cov + (
+            np.eye(bands, dtype=np.float64)
+            * self.regularization
+            * scale
+        )
+
+        # Symmetrize to suppress tiny floating-point asymmetries.
+        return 0.5 * (cov_reg + cov_reg.T)
+
+    @staticmethod
+    def _mahalanobis_scores(
+        x: np.ndarray,
+        mean: np.ndarray,
+        cov: np.ndarray,
+    ) -> np.ndarray:
+        """Compute squared Mahalanobis distances with stable fallbacks."""
+        centered = x - mean
+        bands = cov.shape[0]
+
+        try:
+            chol = linalg.cholesky(cov, lower=True, check_finite=False)
+            whitened = linalg.solve_triangular(
+                chol,
+                centered.T,
+                lower=True,
+                check_finite=False,
+            )
+            scores = np.sum(whitened * whitened, axis=0)
+        except linalg.LinAlgError:
+            try:
+                solved = linalg.solve(
+                    cov,
+                    centered.T,
+                    assume_a="sym",
+                    check_finite=False,
+                )
+                scores = np.sum(centered.T * solved, axis=0)
+            except linalg.LinAlgError:
+                inverse = linalg.pinvh(cov)
+                scores = np.sum((centered @ inverse) * centered, axis=1)
+
+        return np.maximum(np.asarray(scores, dtype=np.float64), 0.0)
+
+    def _fit_standard(self, x: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """Fit the conventional global RX background model."""
+        mean, cov = self._estimate_mean_covariance(x)
+        return mean, self._regularize_covariance(cov)
+
+    def _fit_robust(self, x: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """Iteratively estimate background statistics with upper-tail trimming.
+
+        This is a practical trimmed-covariance estimator, not an exact
+        minimum-covariance-determinant estimator. It starts from standard
+        statistics and repeatedly retains the lowest-distance 80% of pixels.
+        The minimum retained sample count is chosen to keep covariance
+        estimation meaningful for the number of spectral bands.
+        """
+        n_samples, n_bands = x.shape
+
+        if n_samples < 3:
+            return self._fit_standard(x)
+
+        mean, cov = self._fit_standard(x)
+
+        # Keep enough observations to estimate covariance, while trimming
+        # high-distance pixels that can inflate global RX statistics.
+        min_keep = min(n_samples, max(n_bands + 2, int(np.ceil(0.5 * n_samples))))
+        keep_count = max(min_keep, int(np.floor(0.8 * n_samples)))
+        keep_count = min(keep_count, n_samples)
+
+        previous_indices = None
+
+        for _ in range(10):
+            distances = self._mahalanobis_scores(x, mean, cov)
+
+            # Stable sorting makes the result deterministic when scores tie.
+            indices = np.argsort(distances, kind="stable")[:keep_count]
+
+            if (
+                previous_indices is not None
+                and np.array_equal(indices, previous_indices)
+            ):
+                break
+
+            previous_indices = indices
+            candidate_mean, candidate_cov = self._estimate_mean_covariance(
+                x[indices]
+            )
+            mean = candidate_mean
+            cov = self._regularize_covariance(candidate_cov)
+
+        return mean, cov
+
+    def fit(self, cube: np.ndarray) -> "RXDetector":
+        """Fit the detector on a hyperspectral cube of shape (H, W, B)."""
+        cube_val = self.validate_cube(cube)
+        _, _, bands = cube_val.shape
+
+        x = cube_val.reshape(-1, bands).astype(np.float64)
+
+        if not np.all(np.isfinite(x)):
+            raise ValueError("Input cube must contain only finite values.")
+
+        # Clear all cached factors before refitting. This prevents factors
+        # from a previous fit being accidentally reused.
+        self.mean_ = None
+        self.cov_ = None
+        self.chol_lower_ = None
+        self.cov_inv_ = None
+        self.is_fitted = False
+
+        if self.robust:
+            mean, cov_reg = self._fit_robust(x)
+        else:
+            mean, cov_reg = self._fit_standard(x)
+
+        self.mean_ = mean
+        self.cov_ = cov_reg
+
+        if self.method == "cholesky":
+            try:
+                self.chol_lower_ = linalg.cholesky(
+                    cov_reg,
+                    lower=True,
+                    check_finite=False,
+                )
+            except linalg.LinAlgError:
+                # Add scale-aware jitter, with a positive absolute floor.
+                scale = max(
+                    float(np.trace(cov_reg)) / bands
+                    if bands > 0
+                    else 1.0,
+                    1.0,
+                )
+                jitter = max(
+                    self.regularization * scale * 10.0,
+                    np.finfo(np.float64).eps * scale * 100.0,
+                )
+
+                try:
+                    cov_reg = cov_reg + np.eye(bands) * jitter
+                    self.cov_ = cov_reg
+                    self.chol_lower_ = linalg.cholesky(
+                        cov_reg,
+                        lower=True,
+                        check_finite=False,
+                    )
+                except linalg.LinAlgError:
+                    self.cov_inv_ = linalg.pinvh(cov_reg)
+                    self.chol_lower_ = None
+
+        elif self.method == "pinv":
+            self.cov_inv_ = linalg.pinvh(cov_reg)
+
+        # "solve" intentionally stores no factor; predict() solves directly.
+        self.is_fitted = True
         return self
 
-    def _fit_stats(self, x):
-        self.mean_ = x.mean(0)
-        cov = np.cov(x - self.mean_, rowvar=False).reshape(x.shape[1], x.shape[1])
-        lam = self.reg * max(np.trace(cov) / cov.shape[0], 1e-12)
-        cov = cov + lam * np.eye(cov.shape[0])
-        self.cov_ = cov
-        evals, evecs = np.linalg.eigh(cov)
-        evals = np.maximum(evals, lam if lam > 0 else 1e-12)
-        self.inv_cov_ = (evecs / evals) @ evecs.T
-        self.condition_number_ = float(evals.max() / evals.min())
+    def predict(self, cube: np.ndarray) -> np.ndarray:
+        """Return the squared Mahalanobis anomaly score map."""
+        if not self.is_fitted or self.mean_ is None or self.cov_ is None:
+            raise RuntimeError("Detector must be fitted before calling predict.")
 
-    def _mahalanobis(self, x):
-        d = x - self.mean_
-        return np.einsum("ij,jk,ik->i", d, self.inv_cov_, d)
+        cube_val = self.validate_cube(cube)
+        height, width, bands = cube_val.shape
 
-    def score(self, cube):
-        """RX score per pixel, shape (H, W). Higher = more anomalous."""
-        self._check()
-        cube = validate_cube(cube, min_pixels=1)  # fitted model can score any number of pixels
-        h, w, b = cube.shape
-        if b != self.mean_.size:
-            raise HSIValidationError(f"RX was fitted on {self.mean_.size} bands but got {b}.")
-        out = np.empty(h * w)
-        flat = cube.reshape(-1, b)
-        for i in range(0, h * w, 100_000):  # chunked to bound memory
-            out[i:i + 100_000] = self._mahalanobis(flat[i:i + 100_000].astype(np.float64))
-        return np.maximum(out, 0).reshape(h, w)
+        if bands != self.mean_.size:
+            raise ValueError(
+                f"Spectral band count mismatch: fitted on "
+                f"{self.mean_.size} bands, got {bands} bands."
+            )
 
-    def fit_score(self, cube, mask=None):
-        return self.fit(cube, mask).score(cube)
+        x = cube_val.reshape(-1, bands).astype(np.float64)
+        centered = x - self.mean_
 
-    def contributions(self, spectrum):
-        """Additive per-band decomposition: d_b * (Sigma^-1 d)_b, which sums exactly to the RX score.
+        if self.chol_lower_ is not None:
+            whitened = linalg.solve_triangular(
+                self.chol_lower_,
+                centered.T,
+                lower=True,
+                check_finite=False,
+            )
+            scores = np.sum(whitened * whitened, axis=0)
 
-        Large positive terms are the bands that make this pixel unusual.
+        elif self.cov_inv_ is not None:
+            scores = np.sum(
+                (centered @ self.cov_inv_) * centered,
+                axis=1,
+            )
+
+        else:
+            try:
+                solved = linalg.solve(
+                    self.cov_,
+                    centered.T,
+                    assume_a="sym",
+                    check_finite=False,
+                )
+                scores = np.sum(centered.T * solved, axis=0)
+            except linalg.LinAlgError:
+                inverse = linalg.pinvh(self.cov_)
+                scores = np.sum((centered @ inverse) * centered, axis=1)
+
+        scores = np.maximum(np.asarray(scores, dtype=np.float64), 0.0)
+        score_map = scores.reshape(height, width)
+
+        return self.validate_score_map(
+            score_map,
+            expected_shape=(height, width),
+        )
+
+    def score(self, cube: np.ndarray) -> np.ndarray:
+        """Compatibility alias for predict()."""
+        return self.predict(cube)
+
+    def fit_score(
+        self,
+        cube: np.ndarray,
+        mask: Optional[np.ndarray] = None,
+    ) -> np.ndarray:
+        """Fit and return scores.
+
+        The mask parameter is accepted for API compatibility. Ground-truth
+        labels are deliberately not used to estimate the background.
         """
-        self._check()
-        d = np.asarray(spectrum, dtype=np.float64).ravel() - self.mean_
-        return d * (self.inv_cov_ @ d)
+        self.fit(cube)
+        return self.predict(cube)
 
-    def _check(self):
-        if not hasattr(self, "inv_cov_"):
-            raise HSIValidationError("RXDetector must be fitted first.")
+    def contributions(self, pixel: np.ndarray) -> np.ndarray:
+        """Return per-band contributions to the RX quadratic-form score."""
+        if not self.is_fitted or self.mean_ is None or self.cov_ is None:
+            raise RuntimeError(
+                "Detector must be fitted before calling contributions."
+            )
 
+        x = np.asarray(pixel, dtype=np.float64).reshape(-1)
 
-def rx_scores(cube, mask=None, **kwargs):
-    """Convenience: fit global RX on ``cube`` and return the (H, W) score map."""
-    return RXDetector(**kwargs).fit_score(cube, mask)
+        if x.size != self.mean_.size:
+            raise ValueError(
+                "Pixel band count does not match fitted detector."
+            )
 
+        delta = x - self.mean_
 
-def ring_sums(arr, inner: int, outer: int):
-    """Sum and pixel count over the ring (outer window minus inner window) around each pixel.
+        if self.cov_inv_ is not None:
+            inverse_delta = self.cov_inv_ @ delta
+        elif self.chol_lower_ is not None:
+            inverse_delta = linalg.cho_solve(
+                (self.chol_lower_, True),
+                delta,
+                check_finite=False,
+            )
+        else:
+            try:
+                inverse_delta = linalg.solve(
+                    self.cov_,
+                    delta,
+                    assume_a="sym",
+                    check_finite=False,
+                )
+            except linalg.LinAlgError:
+                inverse_delta = linalg.pinvh(self.cov_) @ delta
 
-    ``arr`` has spatial axes first: (H, W, ...). Borders use reflection.
-    """
-    size_o = (outer, outer) + (1,) * (arr.ndim - 2)
-    size_i = (inner, inner) + (1,) * (arr.ndim - 2)
-    so = uniform_filter(arr, size=size_o, mode="reflect") * (outer * outer)
-    si = uniform_filter(arr, size=size_i, mode="reflect") * (inner * inner)
-    return so - si, outer * outer - inner * inner
-
-
-def local_rx(cube, inner: int = 5, outer: int = 15, reg: float = 1e-3, max_memory_mb: int = 1500):
-    """Dual-window local RX. Works best on PCA-reduced data (few bands)."""
-    cube = validate_cube(cube)
-    inner, outer = check_windows(inner, outer, cube.shape)
-    h, w, d = cube.shape
-    n = outer * outer - inner * inner
-    if n <= d:
-        raise HSIValidationError(
-            f"The ring has {n} pixels but there are {d} bands; enlarge the outer window or use PCA.")
-    need_mb = h * w * d * d * 8 * 3 / 1e6
-    if need_mb > max_memory_mb:
-        raise HSIValidationError(
-            f"Local RX would need about {need_mb:.0f} MB. Reduce bands with PCA "
-            f"(currently {d}) or crop the image.")
-    x = cube.astype(np.float64)
-    s1, n = ring_sums(x, inner, outer)
-    outer_prod = x[..., :, None] * x[..., None, :]
-    s2, _ = ring_sums(outer_prod, inner, outer)
-    del outer_prod
-    mu = s1 / n
-    cov = s2 / n - mu[..., :, None] * mu[..., None, :]
-    tr = np.trace(cov, axis1=-2, axis2=-1)[..., None, None] / d
-    cov += (reg * np.maximum(tr, 1e-12)) * np.eye(d)
-    diff = x - mu
-    sol = np.linalg.solve(cov.reshape(-1, d, d), diff.reshape(-1, d, 1)).reshape(h, w, d)
-    return np.maximum((diff * sol).sum(-1), 0)
+        return delta * inverse_delta

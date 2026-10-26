@@ -1,26 +1,311 @@
-"""Tasks 17, 18, 19 - Ground-truth comparison, evaluation metrics, false-alarm analysis.
+"""Evaluation metrics for hyperspectral anomaly and target detection.
 
-    from src.evaluation.metrics import compare_to_gt, mask_metrics, score_metrics, false_alarm_analysis
+This module provides standard quantitative benchmarks tailored for anomaly
+detection under severe class imbalance (often < 1% anomalous pixels).
 
-    cmp = compare_to_gt(mask, gt)            # task 17: TP/FP/FN/TN map + pixel and object counts
-    m   = mask_metrics(mask, gt)             # task 18: precision, recall, F1, FPR, IoU ...
-    s   = score_metrics(scores, gt)          # task 18: ROC-AUC, average precision, Pd at fixed FAR
-    fa  = false_alarm_analysis(mask, gt, scores=scores)   # task 19
-
-Pixel counts follow the usual convention: positive = target/anomaly pixel.
+Metrics:
+    - ROC-AUC: Area under the Receiver Operating Characteristic (TPR vs. FPR).
+    - Average Precision (AP): Area under the Precision-Recall curve using the
+      step-wise interpolation definition: AP = sum_n (R_n - R_{n-1}) * P_n.
+    - Maximum F1 (F1-max): The peak harmonic mean of Precision and Recall across
+      all potential decision thresholds, along with the optimal threshold.
+    - FPR at target TPR (default 95%): The false-positive rate required to achieve
+      at least 95% detection probability of anomalous pixels.
+    - False Alarms per Megapixel: Operational metric quantifying the number of
+      false positives per 1,000,000 pixels at the designated operating point.
 """
-from __future__ import annotations
 
+from typing import Dict, Optional, Tuple, Union
 import numpy as np
-from scipy.ndimage import label
-from sklearn.metrics import average_precision_score, precision_recall_curve, roc_auc_score, roc_curve
-
 from src.utils.validation import HSIValidationError, validate_gt, validate_score_map
+from sklearn.metrics import average_precision_score, precision_recall_curve, roc_auc_score, roc_curve
+from scipy.ndimage import label
+from sklearn import metrics as sk_metrics
+
+
+def sanitize_inputs(
+    y_true: np.ndarray, y_score: np.ndarray
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Validate and flatten binary ground truth and continuous anomaly scores.
+
+    Args:
+        y_true: Binary ground truth mask (H, W) or (N,), with values in {0, 1}.
+        y_score: Continuous anomaly score map (H, W) or (N,).
+
+    Returns:
+        Tuple[np.ndarray, np.ndarray]: Flattened 1D (y_true, y_score) as (int32, float64).
+
+    Raises:
+        TypeError: If inputs are not numpy arrays.
+        ValueError: If array sizes mismatch, contain non-finite numbers, or y_true
+                    contains values outside {0, 1}.
+    """
+    if not isinstance(y_true, np.ndarray) or not isinstance(y_score, np.ndarray):
+        raise TypeError("Both y_true and y_score must be numpy.ndarray instances")
+
+    if y_true.shape != y_score.shape:
+        raise ValueError(
+            f"Shape mismatch: y_true shape {y_true.shape} != y_score shape {y_score.shape}"
+        )
+
+    yt = np.asarray(y_true).ravel()
+    ys = np.asarray(y_score).ravel().astype(np.float64)
+
+    if yt.size == 0:
+        raise ValueError("Inputs must not be empty")
+
+    if not np.all(np.isfinite(yt)) or not np.all(np.isfinite(ys)):
+        raise ValueError("y_true and y_score must not contain NaN or Inf values")
+
+    # Binary check on y_true
+    unique_vals = np.unique(yt)
+    if not np.all(np.isin(unique_vals, [0, 1])):
+        raise ValueError(f"y_true must contain only binary values {{0, 1}}, got {unique_vals}")
+
+    return yt.astype(np.int32), ys
+
+
+def roc_auc(y_true: np.ndarray, y_score: np.ndarray) -> float:
+    """Compute Area Under the Receiver Operating Characteristic Curve (ROC-AUC).
+
+    Definition:
+        Integral of TPR with respect to FPR across all thresholds in [-inf, inf].
+        A perfect detector achieves 1.0; a random guessing detector achieves 0.5.
+
+    Args:
+        y_true: Binary ground truth {0, 1}.
+        y_score: Continuous anomaly scores (higher indicates anomaly).
+
+    Returns:
+        float: ROC-AUC score in [0.0, 1.0], or np.nan if ground truth has only 1 class.
+    """
+    yt, ys = sanitize_inputs(y_true, y_score)
+    n_pos = np.sum(yt == 1)
+    n_neg = np.sum(yt == 0)
+
+    if n_pos == 0 or n_neg == 0:
+        return float(np.nan)
+
+    # If scores are constant, ROC-AUC is 0.5
+    if np.all(ys == ys[0]):
+        return 0.5
+
+    return float(sk_metrics.roc_auc_score(yt, ys))
+
+
+def average_precision(y_true: np.ndarray, y_score: np.ndarray) -> float:
+    """Compute Average Precision (AP / PR-AUC).
+
+    Definition:
+        Standard PASCAL VOC / scikit-learn step-wise formula:
+            AP = sum_n (R_n - R_{n-1}) * P_n
+        where P_n and R_n are precision and recall at the n-th threshold.
+        Unlike ROC-AUC, AP is not inflated by large numbers of true negative background pixels.
+
+    Args:
+        y_true: Binary ground truth {0, 1}.
+        y_score: Continuous anomaly scores (higher indicates anomaly).
+
+    Returns:
+        float: Average precision in [0.0, 1.0], or np.nan if no positive samples exist.
+    """
+    yt, ys = sanitize_inputs(y_true, y_score)
+    n_pos = np.sum(yt == 1)
+
+    if n_pos == 0:
+        return float(np.nan)
+
+    # If scores are constant, AP is the prevalence of positive samples
+    if np.all(ys == ys[0]):
+        return float(n_pos / len(yt))
+
+    return float(sk_metrics.average_precision_score(yt, ys))
+
+
+def max_f1_score(
+    y_true: np.ndarray, y_score: np.ndarray, n_thresholds: int = 500
+) -> Tuple[float, float]:
+    """Find maximum F1 score across varying decision thresholds.
+
+    Definition:
+        F1(tau) = 2 * (Precision(tau) * Recall(tau)) / (Precision(tau) + Recall(tau))
+        Finds: F1_max = max_{tau} F1(tau) and optimal threshold tau*.
+
+    Args:
+        y_true: Binary ground truth {0, 1}.
+        y_score: Continuous anomaly scores.
+        n_thresholds: Maximum number of threshold samples to evaluate.
+
+    Returns:
+        Tuple[float, float]: (max_f1, optimal_threshold).
+    """
+    yt, ys = sanitize_inputs(y_true, y_score)
+    n_pos = np.sum(yt == 1)
+
+    if n_pos == 0:
+        return (0.0, float(np.nan))
+
+    precision, recall, thresholds = sk_metrics.precision_recall_curve(yt, ys)
+
+    # precision_recall_curve returns precision and recall of len(thresholds) + 1
+    # last precision is 1.0 and recall is 0.0
+    p = precision[:-1]
+    r = recall[:-1]
+
+    denom = p + r
+    f1_scores = np.zeros_like(p)
+    valid_mask = denom > 0
+    f1_scores[valid_mask] = (2.0 * p[valid_mask] * r[valid_mask]) / denom[valid_mask]
+
+    if len(f1_scores) == 0:
+        return (0.0, float(ys[0]))
+
+    best_idx = int(np.argmax(f1_scores))
+    best_f1 = float(f1_scores[best_idx])
+    best_thresh = float(thresholds[best_idx])
+
+    return (best_f1, best_thresh)
+
+
+def fpr_at_tpr(
+    y_true: np.ndarray, y_score: np.ndarray, target_tpr: float = 0.95
+) -> float:
+    """Compute False Positive Rate (FPR) when True Positive Rate (TPR) >= target_tpr.
+
+    Definition:
+        FPR = FP / (FP + TN)
+        Operating point standard in defense surveillance where a high probability of
+        detection (e.g. 95%) is required while minimizing false alarms.
+
+    Args:
+        y_true: Binary ground truth {0, 1}.
+        y_score: Continuous anomaly scores.
+        target_tpr: Desired true positive rate (default: 0.95).
+
+    Returns:
+        float: Minimum FPR achieving TPR >= target_tpr, in [0.0, 1.0].
+    """
+    yt, ys = sanitize_inputs(y_true, y_score)
+    n_pos = np.sum(yt == 1)
+    n_neg = np.sum(yt == 0)
+
+    if n_pos == 0 or n_neg == 0:
+        return float(np.nan)
+
+    fpr_arr, tpr_arr, _ = sk_metrics.roc_curve(yt, ys, drop_intermediate=True)
+
+    # Find indices where TPR >= target_tpr
+    eligible_indices = np.where(tpr_arr >= target_tpr)[0]
+    if len(eligible_indices) == 0:
+        # Never achieved
+        return 1.0
+
+    # Among eligible operating points, find minimal FPR
+    min_fpr = float(np.min(fpr_arr[eligible_indices]))
+    return min_fpr
+
+
+def false_alarms_per_megapixel(
+    y_true: np.ndarray,
+    y_score: np.ndarray,
+    threshold: Optional[float] = None,
+    target_tpr: float = 0.95,
+) -> float:
+    """Compute false alarms per megapixel (1,000,000 pixels).
+
+    Definition:
+        FAR_mega = (False Positives / Total Pixels) * 1,000,000
+        If threshold is not provided, the threshold corresponding to target_tpr (0.95)
+        is automatically selected.
+
+    Args:
+        y_true: Binary ground truth {0, 1}.
+        y_score: Continuous anomaly scores.
+        threshold: Explicit score threshold for anomaly classification (score >= threshold).
+        target_tpr: Target TPR to select threshold if threshold is None (default: 0.95).
+
+    Returns:
+        float: False alarms per megapixel.
+    """
+    yt, ys = sanitize_inputs(y_true, y_score)
+    total_pixels = len(yt)
+
+    if threshold is None:
+        fpr_arr, tpr_arr, thresh_arr = sk_metrics.roc_curve(yt, ys, drop_intermediate=True)
+        eligible = np.where(tpr_arr >= target_tpr)[0]
+        if len(eligible) > 0:
+            # Pick highest threshold that still guarantees TPR >= target_tpr
+            best_idx = eligible[0]
+            thresh = thresh_arr[best_idx]
+        else:
+            thresh = np.min(ys)
+    else:
+        thresh = float(threshold)
+
+    # Predict: 1 if score >= thresh else 0
+    y_pred = (ys >= thresh).astype(np.int32)
+
+    # False positives: true background (0) predicted as anomaly (1)
+    false_positives = int(np.sum((yt == 0) & (y_pred == 1)))
+
+    far_mega = (false_positives / total_pixels) * 1_000_000.0
+    return float(far_mega)
+
+
+def evaluate_anomaly_map(
+    y_true: np.ndarray,
+    y_score: np.ndarray,
+    target_tpr: float = 0.95,
+) -> Dict[str, Union[float, int]]:
+    """Comprehensive evaluation dictionary for an anomaly detection result.
+
+    Args:
+        y_true: Binary ground truth mask (H, W) or (N,).
+        y_score: Anomaly score map (H, W) or (N,).
+        target_tpr: Target TPR for defense operating point (default 0.95).
+
+    Returns:
+        dict: Standard metric dictionary containing:
+            - auc_roc: Area under ROC curve
+            - auc_pr: Average precision (PR-AUC)
+            - f1_max: Peak F1 score
+            - optimal_threshold: Score threshold achieving peak F1
+            - fpr_at_95_tpr: FPR at target TPR
+            - false_alarms_per_mp: False alarms per megapixel at target TPR
+            - total_pixels: Spatial pixel count
+            - anomaly_pixels: Total anomaly ground truth pixels
+            - anomaly_pct: Percentage of anomalous pixels
+    """
+    yt, ys = sanitize_inputs(y_true, y_score)
+    total_pixels = len(yt)
+    n_pos = int(np.sum(yt == 1))
+    anomaly_pct = float((n_pos / total_pixels) * 100.0)
+
+    f1_val, opt_thresh = max_f1_score(yt, ys)
+    fpr_val = fpr_at_tpr(yt, ys, target_tpr=target_tpr)
+    far_val = false_alarms_per_megapixel(yt, ys, target_tpr=target_tpr)
+
+    return {
+        "auc_roc": roc_auc(yt, ys),
+        "auc_pr": average_precision(yt, ys),
+        "f1_max": f1_val,
+        "optimal_threshold": opt_thresh,
+        "fpr_at_95_tpr": fpr_val,
+        "false_alarms_per_mp": far_val,
+        "total_pixels": total_pixels,
+        "anomaly_pixels": n_pos,
+        "anomaly_pct": anomaly_pct,
+    }
+
+
+# Legacy pipeline compatibility functions
 
 TN, TP, FP, FN = 0, 1, 2, 3
 CATEGORY_NAMES = {TN: "true negative", TP: "true positive", FP: "false alarm", FN: "missed"}
 _EIGHT = np.ones((3, 3), int)
 
+CATEGORY_NAMES = {TN: "true negative", TP: "true positive", FP: "false alarm", FN: "missed"}
+_EIGHT = np.ones((3, 3), int)
 
 def _prep(mask, gt):
     mask = np.asarray(mask)
@@ -29,8 +314,6 @@ def _prep(mask, gt):
     gt = validate_gt(gt, mask.shape + (1,)).astype(bool)
     return mask.astype(bool), gt
 
-
-# ------------------------------------------------------------------- task 17
 def compare_to_gt(mask, gt, valid_mask=None) -> dict:
     """Pixel-by-pixel and object-by-object comparison of a detection mask with ground truth.
 
@@ -59,8 +342,6 @@ def compare_to_gt(mask, gt, valid_mask=None) -> dict:
         "detected_regions": int(n_det), "false_alarm_regions": int(fa_regions),
     }
 
-
-# ------------------------------------------------------------------- task 18
 def mask_metrics(mask, gt) -> dict:
     """Threshold-dependent metrics for a binary detection mask."""
     m, g = _prep(mask, gt)
@@ -76,7 +357,6 @@ def mask_metrics(mask, gt) -> dict:
         "false_alarms_per_megapixel": fp / m.size * 1e6,
         "tp": tp, "fp": fp, "fn": fn, "tn": tn,
     }
-
 
 def score_metrics(scores, gt, fars=(1e-3, 1e-2, 5e-2), curves: bool = False) -> dict:
     """Threshold-free metrics for a continuous score map.
@@ -101,8 +381,6 @@ def score_metrics(scores, gt, fars=(1e-3, 1e-2, 5e-2), curves: bool = False) -> 
         out["pr_curve"] = {"precision": p, "recall": r}
     return out
 
-
-# ------------------------------------------------------------------- task 19
 def false_alarm_analysis(mask, gt, scores=None, scene_labels=None, label_names=None,
                          percents=(0.1, 0.5, 1, 2, 5, 10)) -> dict:
     """How often, where, and in what form background pixels are wrongly flagged.
@@ -155,15 +433,4 @@ def false_alarm_analysis(mask, gt, scores=None, scene_labels=None, label_names=N
                          "recall": float((d & g).sum() / max(g.sum(), 1)),
                          "false_alarms": int((d & ~g).sum())})
         out["tradeoff"] = rows
-    return out
-
-
-def evaluate(scores, mask, gt, valid_mask=None) -> dict:
-    """All metrics in one flat dict (handy for tables and the dashboard)."""
-    out = {}
-    out.update(score_metrics(scores, gt))
-    out.update(mask_metrics(mask, gt))
-    c = compare_to_gt(mask, gt, valid_mask)
-    out.update({k: c[k] for k in ("gt_objects", "objects_detected", "object_detection_rate",
-                                  "false_alarm_regions")})
     return out

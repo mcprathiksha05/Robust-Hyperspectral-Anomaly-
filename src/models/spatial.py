@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from src.models.rx import ring_sums
+from src.models.rx_compat import ring_sums
 from src.utils.validation import check_choice, check_windows, validate_cube
 
 METRICS = {"euclidean", "zscore", "sam"}

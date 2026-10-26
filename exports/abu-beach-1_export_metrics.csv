@@ -1,0 +1,13 @@
+Category,Field,Value
+Metadata,dataset,abu-beach-1
+Metadata,detector,Global-RX
+Metadata,detector_config,"{'regularization': 1e-06, 'method': 'solve'}"
+Metric,auc_roc,0.9792807493579374
+Metric,auc_pr,0.44038256786748115
+Metric,f1_max,0.5263157894736842
+Metric,optimal_threshold,2949.696490857544
+Metric,fpr_at_95_tpr,0.3089720208175793
+Metric,false_alarms_per_mp,308711.1111111111
+Metric,total_pixels,22500
+Metric,anomaly_pixels,19
+Metric,anomaly_pct,0.08444444444444445

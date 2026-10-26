@@ -1,0 +1,201 @@
+"""Global Reed-Xiaoli (RX) Anomaly Detector.
+
+Reference baseline implementation of the benchmark RX anomaly detector
+(Reed & Yu, 1990) for hyperspectral imagery.
+
+Formulation:
+    Let X be an (N x B) matrix of N = H * W spatial pixels across B spectral bands.
+    Mean background vector:
+        mu = (1 / N) * sum(x_i)
+    Sample covariance matrix:
+        Sigma = (1 / (N - 1)) * (X - mu)^T * (X - mu)
+    Regularized covariance:
+        Sigma_reg = Sigma + (reg * trace(Sigma) / B) * I_B
+    Mahalanobis anomaly score for pixel x:
+        r(x) = (x - mu)^T * Sigma_reg^(-1) * (x - mu)
+
+Assumptions:
+    1. The background is unimodal and governed by a multivariate Gaussian distribution.
+    2. Anomalous targets are spatially sparse and low in abundance, so they do
+       not substantially bias the global background mean or covariance estimate.
+    3. Spectral relationships are stationary across the entire spatial scene.
+
+Limitations:
+    1. Multi-modal backgrounds (e.g. mixture of vegetation, asphalt, water, and soil)
+       violate the unimodal Gaussian assumption, leading to higher false alarm rates.
+    2. Ill-conditioning or singularity occurs when bands are collinear or when B >= N.
+       This is addressed here via adaptive diagonal Tikhonov regularization.
+"""
+
+from typing import Optional, Literal
+import numpy as np
+from scipy import linalg
+
+from src.models.base import BaseDetector
+
+
+class RXDetector(BaseDetector):
+    """Global Reed-Xiaoli (RX) anomaly detector.
+
+    Attributes:
+        regularization: Relative regularization factor applied to covariance diagonal.
+                        Added term is: reg * trace(Sigma) / B * I.
+        method: Method used to solve the quadratic form ('cholesky', 'solve', or 'pinv').
+        mean_: Fitted background mean vector of shape (B,).
+        cov_: Fitted regularized background covariance matrix of shape (B, B).
+        cov_inv_: Fitted inverse or pseudo-inverse covariance matrix (if pinv method).
+    """
+
+    def __init__(
+        self,
+        regularization: float = 1e-6,
+        method: Literal["cholesky", "solve", "pinv"] = "cholesky",
+        name: Optional[str] = "Global-RX",
+        reg: Optional[float] = None,
+        robust: bool = False,
+        random_state: Optional[int] = None,
+    ):
+        super().__init__(name=name)
+        if reg is not None:
+            regularization = reg
+        if regularization < 0:
+            raise ValueError(f"Regularization factor must be non-negative, got {regularization}")
+        if method not in ("cholesky", "solve", "pinv"):
+            raise ValueError(f"Method must be 'cholesky', 'solve', or 'pinv', got {method}")
+
+        self.regularization = float(regularization)
+        self.method = method
+        self.mean_: Optional[np.ndarray] = None
+        self.cov_: Optional[np.ndarray] = None
+        self.chol_lower_: Optional[np.ndarray] = None
+        self.cov_inv_: Optional[np.ndarray] = None
+
+    def fit(self, cube: np.ndarray) -> "RXDetector":
+        """Estimate background mean and regularized covariance from the cube.
+
+        Args:
+            cube: Input HSI cube of shape (H, W, B).
+
+        Returns:
+            self: The fitted RXDetector instance.
+        """
+        cube_val = self.validate_cube(cube)
+        h, w, b = cube_val.shape
+        n_pixels = h * w
+
+        # Reshape to (N, B)
+        x = cube_val.reshape(n_pixels, b).astype(np.float64)
+
+        # 1. Background mean
+        self.mean_ = np.mean(x, axis=0)
+
+        # 2. Centered data
+        x_centered = x - self.mean_
+
+        # 3. Sample covariance
+        # ddof=1 for unbiased sample covariance
+        ddof = 1 if n_pixels > 1 else 0
+        cov = np.cov(x_centered, rowvar=False, ddof=ddof)
+
+        if cov.ndim == 0:  # Single band edge-case
+            cov = cov.reshape(1, 1)
+
+        # 4. Scale-invariant adaptive diagonal regularization
+        trace_val = np.trace(cov)
+        scale = (trace_val / b) if (trace_val > 0 and b > 0) else 1.0
+        diag_reg = self.regularization * scale
+
+        cov_reg = cov + np.eye(b, dtype=np.float64) * diag_reg
+
+        # 5. Numerical factor preparation
+        if self.method == "cholesky":
+            try:
+                # Lower triangular Cholesky factor L: Sigma = L * L^T
+                self.chol_lower_ = linalg.cholesky(cov_reg, lower=True)
+            except linalg.LinAlgError:
+                # Fall back to additional jitter or pinv if singular
+                try:
+                    jitter = max(diag_reg * 10.0, 1e-6)
+                    self.chol_lower_ = linalg.cholesky(cov_reg + np.eye(b) * jitter, lower=True)
+                except linalg.LinAlgError:
+                    # Final fallback to pseudoinverse
+                    self.cov_inv_ = linalg.pinvh(cov_reg)
+                    self.chol_lower_ = None
+        elif self.method == "pinv":
+            self.cov_inv_ = linalg.pinvh(cov_reg)
+        elif self.method == "solve":
+            # Will use linalg.solve directly in predict
+            pass
+
+        self.cov_ = cov_reg
+        self.is_fitted = True
+        return self
+
+    def predict(self, cube: np.ndarray) -> np.ndarray:
+        """Compute the RX Mahalanobis distance squared score map.
+
+        Args:
+            cube: Input HSI cube of shape (H, W, B).
+
+        Returns:
+            np.ndarray: Anomaly score map of shape (H, W). Higher = more anomalous.
+        """
+        if not self.is_fitted or self.mean_ is None or self.cov_ is None:
+            raise RuntimeError("Detector must be fitted before calling predict.")
+
+        cube_val = self.validate_cube(cube)
+        h, w, b = cube_val.shape
+        if b != len(self.mean_):
+            raise ValueError(
+                f"Spectral band count mismatch: fitted on {len(self.mean_)} bands, got {b} bands."
+            )
+
+        n_pixels = h * w
+        x = cube_val.reshape(n_pixels, b).astype(np.float64)
+        x_centered = x - self.mean_
+
+        # Compute Mahalanobis distance squared: (x - mu)^T * Sigma^(-1) * (x - mu)
+        if self.chol_lower_ is not None:
+            # Solve L * y = x_centered^T  =>  y = L^(-1) * x_centered^T
+            # Mahalanobis distance squared is sum of squares of y along bands
+            y = linalg.solve_triangular(self.chol_lower_, x_centered.T, lower=True, check_finite=False)
+            scores_flat = np.sum(y**2, axis=0)
+        elif self.cov_inv_ is not None:
+            # Quadratic form via pinv: sum( (X * cov_inv) * X, axis=1 )
+            scores_flat = np.sum(np.dot(x_centered, self.cov_inv_) * x_centered, axis=1)
+        else:
+            # Solve Sigma * y = x_centered^T
+            y = linalg.solve(self.cov_, x_centered.T, assume_a="pos", check_finite=False)
+            scores_flat = np.sum(x_centered.T * y, axis=0)
+
+        # Enforce non-negative scores (distance squared)
+        scores_flat = np.maximum(scores_flat, 0.0)
+        score_map = scores_flat.reshape(h, w)
+
+        return self.validate_score_map(score_map, expected_shape=(h, w))
+
+
+    def score(self, cube: np.ndarray) -> np.ndarray:
+        """Compatibility alias for predict()."""
+        return self.predict(cube)
+
+    def fit_score(self, cube: np.ndarray, mask=None) -> np.ndarray:
+        """Fit the detector and return its anomaly score map."""
+        self.fit(cube)
+        return self.predict(cube)
+
+    def contributions(self, pixel: np.ndarray) -> np.ndarray:
+        """Return per-band contributions to the RX quadratic-form score."""
+        if not self.is_fitted or self.mean_ is None or self.cov_ is None:
+            raise RuntimeError("Detector must be fitted before calling contributions.")
+        x = np.asarray(pixel, dtype=np.float64).reshape(-1)
+        if x.size != self.mean_.size:
+            raise ValueError("Pixel band count does not match fitted detector.")
+        delta = x - self.mean_
+        if self.cov_inv_ is None:
+            inv = linalg.cho_solve(
+                (self.chol_lower_, True), np.eye(self.mean_.size)
+            ) if self.chol_lower_ is not None else linalg.inv(self.cov_)
+        else:
+            inv = self.cov_inv_
+        return delta * (inv @ delta)

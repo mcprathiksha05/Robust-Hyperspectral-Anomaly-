@@ -24,7 +24,8 @@ import numpy as np
 from src.evaluation.metrics import compare_to_gt, false_alarm_analysis, mask_metrics, score_metrics
 from src.models.autoencoder import SpectralAutoencoder
 from src.models.fusion import FUSIONS, NORMALIZATIONS, fuse_scores, normalize_scores
-from src.models.rx import RXDetector, local_rx
+from src.models.rx import RXDetector
+from src.models.rx_compat import local_rx
 from src.models.spatial import METRICS as SPATIAL_METRICS
 from src.models.spatial import spatial_residual
 from src.models.threshold import METHODS as THRESHOLD_METHODS

@@ -4,3 +4,4 @@ data/processed/*.mat
 __pycache__/
 .ipynb_checkpoints/
 experiments/results/*.log
+data/history/
