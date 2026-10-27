@@ -1,0 +1,101 @@
+dataset,method,scene,abundance,roc_auc,ap,occlusion,targets
+implant-abu-beach-2-a05,RX baseline,implant,0.05,0.433425,0.00849356,,
+implant-abu-beach-2-a05,Robust RX + PCA,implant,0.05,0.775443,0.0211158,,
+implant-abu-beach-2-a05,Spatial residual,implant,0.05,0.659346,0.0136464,,
+implant-abu-beach-2-a05,Fusion RX+spatial,implant,0.05,0.726445,0.0173973,,
+implant-abu-beach-2-a10,RX baseline,implant,0.1,0.453245,0.00852468,,
+implant-abu-beach-2-a10,Robust RX + PCA,implant,0.1,0.838195,0.0297312,,
+implant-abu-beach-2-a10,Spatial residual,implant,0.1,0.725404,0.0172761,,
+implant-abu-beach-2-a10,Fusion RX+spatial,implant,0.1,0.789685,0.0228744,,
+implant-abu-beach-2-a20,RX baseline,implant,0.2,0.50247,0.00914985,,
+implant-abu-beach-2-a20,Robust RX + PCA,implant,0.2,0.857561,0.0337632,,
+implant-abu-beach-2-a20,Spatial residual,implant,0.2,0.761941,0.0201733,,
+implant-abu-beach-2-a20,Fusion RX+spatial,implant,0.2,0.850993,0.0322393,,
+implant-abu-beach-2-a40,RX baseline,implant,0.4,0.678026,0.0145884,,
+implant-abu-beach-2-a40,Robust RX + PCA,implant,0.4,0.875652,0.0385305,,
+implant-abu-beach-2-a40,Spatial residual,implant,0.4,0.788451,0.0227104,,
+implant-abu-beach-2-a40,Fusion RX+spatial,implant,0.4,0.874948,0.0383178,,
+implant-abu-urban-1-a05,RX baseline,implant,0.05,0.581295,0.0134099,,
+implant-abu-urban-1-a05,Robust RX + PCA,implant,0.05,0.59895,0.015435,,
+implant-abu-urban-1-a05,Spatial residual,implant,0.05,0.487052,0.00911904,,
+implant-abu-urban-1-a05,Fusion RX+spatial,implant,0.05,0.564683,0.0140455,,
+implant-abu-urban-1-a10,RX baseline,implant,0.1,0.695661,0.0190005,,
+implant-abu-urban-1-a10,Robust RX + PCA,implant,0.1,0.700367,0.0183288,,
+implant-abu-urban-1-a10,Spatial residual,implant,0.1,0.549596,0.0101791,,
+implant-abu-urban-1-a10,Fusion RX+spatial,implant,0.1,0.655833,0.0159174,,
+implant-abu-urban-1-a20,RX baseline,implant,0.2,0.835628,0.0319399,,
+implant-abu-urban-1-a20,Robust RX + PCA,implant,0.2,0.85696,0.0314458,,
+implant-abu-urban-1-a20,Spatial residual,implant,0.2,0.741868,0.0183386,,
+implant-abu-urban-1-a20,Fusion RX+spatial,implant,0.2,0.819572,0.0255713,,
+implant-abu-urban-1-a40,RX baseline,implant,0.4,0.885994,0.0656788,,
+implant-abu-urban-1-a40,Robust RX + PCA,implant,0.4,0.936162,0.0668668,,
+implant-abu-urban-1-a40,Spatial residual,implant,0.4,0.88008,0.038206,,
+implant-abu-urban-1-a40,Fusion RX+spatial,implant,0.4,0.93848,0.0693148,,
+implant-hydice-urban-a05,RX baseline,hydice-urban,0.05,0.453757,0.0103998,,
+implant-hydice-urban-a05,Robust RX + PCA,hydice-urban,0.05,0.484728,0.0114662,,
+implant-hydice-urban-a05,Spatial residual,hydice-urban,0.05,0.484296,0.0115137,,
+implant-hydice-urban-a05,Fusion RX+spatial,hydice-urban,0.05,0.463986,0.0113916,,
+implant-hydice-urban-a10,RX baseline,hydice-urban,0.1,0.459643,0.0106465,,
+implant-hydice-urban-a10,Robust RX + PCA,hydice-urban,0.1,0.524068,0.0122466,,
+implant-hydice-urban-a10,Spatial residual,hydice-urban,0.1,0.54809,0.0126557,,
+implant-hydice-urban-a10,Fusion RX+spatial,hydice-urban,0.1,0.522412,0.0123988,,
+implant-hydice-urban-a20,RX baseline,hydice-urban,0.2,0.522067,0.0117443,,
+implant-hydice-urban-a20,Robust RX + PCA,hydice-urban,0.2,0.723672,0.0201121,,
+implant-hydice-urban-a20,Spatial residual,hydice-urban,0.2,0.794411,0.0256534,,
+implant-hydice-urban-a20,Fusion RX+spatial,hydice-urban,0.2,0.757639,0.022528,,
+implant-hydice-urban-a40,RX baseline,hydice-urban,0.4,0.683764,0.017858,,
+implant-hydice-urban-a40,Robust RX + PCA,hydice-urban,0.4,0.947179,0.0877208,,
+implant-hydice-urban-a40,Spatial residual,hydice-urban,0.4,0.951055,0.0978094,,
+implant-hydice-urban-a40,Fusion RX+spatial,hydice-urban,0.4,0.952061,0.0957551,,
+implant-san-diego-a05,RX baseline,san-diego,0.05,0.47917,0.00984892,,
+implant-san-diego-a05,Robust RX + PCA,san-diego,0.05,0.534805,0.0100419,,
+implant-san-diego-a05,Spatial residual,san-diego,0.05,0.499825,0.00914767,,
+implant-san-diego-a05,Fusion RX+spatial,san-diego,0.05,0.503056,0.009541,,
+implant-san-diego-a10,RX baseline,san-diego,0.1,0.49469,0.0103997,,
+implant-san-diego-a10,Robust RX + PCA,san-diego,0.1,0.647209,0.0129965,,
+implant-san-diego-a10,Spatial residual,san-diego,0.1,0.576676,0.0107877,,
+implant-san-diego-a10,Fusion RX+spatial,san-diego,0.1,0.592803,0.0112626,,
+implant-san-diego-a20,RX baseline,san-diego,0.2,0.538484,0.0128732,,
+implant-san-diego-a20,Robust RX + PCA,san-diego,0.2,0.789342,0.022103,,
+implant-san-diego-a20,Spatial residual,san-diego,0.2,0.747177,0.0184045,,
+implant-san-diego-a20,Fusion RX+spatial,san-diego,0.2,0.75823,0.0189724,,
+implant-san-diego-a40,RX baseline,san-diego,0.4,0.645357,0.0220658,,
+implant-san-diego-a40,Robust RX + PCA,san-diego,0.4,0.930471,0.0653796,,
+implant-san-diego-a40,Spatial residual,san-diego,0.4,0.880936,0.0503663,,
+implant-san-diego-a40,Fusion RX+spatial,san-diego,0.4,0.941422,0.0779386,,
+muufl-flight1-camo,RX baseline,,,0.822923,0.0798726,open,15
+muufl-flight1-camo,RX baseline,,,0.467884,0.000343233,shadow,8
+muufl-flight1-camo,RX baseline,,,0.540169,0.00319438,under trees,37
+muufl-flight1-camo,Robust RX + PCA,,,0.786391,0.00781653,open,15
+muufl-flight1-camo,Robust RX + PCA,,,0.528911,0.000357902,shadow,8
+muufl-flight1-camo,Robust RX + PCA,,,0.500655,0.00225083,under trees,37
+muufl-flight1-camo,Spatial residual,,,0.711186,0.00145233,open,15
+muufl-flight1-camo,Spatial residual,,,0.59268,0.000304681,shadow,8
+muufl-flight1-camo,Spatial residual,,,0.492759,0.0015382,under trees,37
+muufl-flight1-camo,Fusion RX+spatial,,,0.785677,0.0078589,open,15
+muufl-flight1-camo,Fusion RX+spatial,,,0.555399,0.000374937,shadow,8
+muufl-flight1-camo,Fusion RX+spatial,,,0.471893,0.00219167,under trees,37
+muufl-flight3-camo,RX baseline,,,0.890907,0.0804608,open,15
+muufl-flight3-camo,RX baseline,,,0.615695,0.00181639,shadow,8
+muufl-flight3-camo,RX baseline,,,0.557451,0.00352824,under trees,37
+muufl-flight3-camo,Robust RX + PCA,,,0.844664,0.0189775,open,15
+muufl-flight3-camo,Robust RX + PCA,,,0.717824,0.00160006,shadow,8
+muufl-flight3-camo,Robust RX + PCA,,,0.535927,0.00218713,under trees,37
+muufl-flight3-camo,Spatial residual,,,0.809432,0.00180151,open,15
+muufl-flight3-camo,Spatial residual,,,0.587169,0.000582666,shadow,8
+muufl-flight3-camo,Spatial residual,,,0.445633,0.00138722,under trees,37
+muufl-flight3-camo,Fusion RX+spatial,,,0.846521,0.0188232,open,15
+muufl-flight3-camo,Fusion RX+spatial,,,0.712767,0.00156882,shadow,8
+muufl-flight3-camo,Fusion RX+spatial,,,0.503371,0.00203216,under trees,37
+muufl-flight4-camo,RX baseline,,,0.892295,0.064664,open,15
+muufl-flight4-camo,RX baseline,,,0.602476,0.00268791,shadow,8
+muufl-flight4-camo,RX baseline,,,0.487263,0.00204292,under trees,37
+muufl-flight4-camo,Robust RX + PCA,,,0.846753,0.0144081,open,15
+muufl-flight4-camo,Robust RX + PCA,,,0.598834,0.00210146,shadow,8
+muufl-flight4-camo,Robust RX + PCA,,,0.503554,0.0014228,under trees,37
+muufl-flight4-camo,Spatial residual,,,0.758686,0.00259899,open,15
+muufl-flight4-camo,Spatial residual,,,0.618235,0.000440292,shadow,8
+muufl-flight4-camo,Spatial residual,,,0.531477,0.00150363,under trees,37
+muufl-flight4-camo,Fusion RX+spatial,,,0.843697,0.0142285,open,15
+muufl-flight4-camo,Fusion RX+spatial,,,0.629989,0.00213586,shadow,8
+muufl-flight4-camo,Fusion RX+spatial,,,0.516564,0.00145953,under trees,37

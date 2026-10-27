@@ -16,11 +16,16 @@ class DatasetLoadError(ValueError):
     """Raised when a discovered dataset is missing or structurally invalid."""
 
 
-def list_datasets() -> List[str]:
-    """Return identifiers for local NPZ datasets, independent of dataset names."""
-    if not ROOT.is_dir():
+def list_datasets(group: Optional[str] = None) -> List[str]:
+    """Return identifiers for local NPZ datasets, independent of dataset names.
+
+    ``group`` limits the list to one sub-folder of data/processed, e.g. 'anomaly',
+    'target' or 'camouflage'. ``None`` (default) lists every dataset.
+    """
+    base = ROOT / group if group else ROOT
+    if not base.is_dir():
         return []
-    return sorted(path.stem for path in ROOT.rglob("*.npz"))
+    return sorted(path.stem for path in base.rglob("*.npz"))
 
 
 def get_dataset_path(name: str) -> Path:

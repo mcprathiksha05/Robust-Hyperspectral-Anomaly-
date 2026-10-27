@@ -13,7 +13,7 @@ import gc
 import sys
 import time
 import tracemalloc
-from typing import Any, Callable, Dict, List, Optional, Tuple, Type, Union
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Type, Union
 import numpy as np
 
 try:

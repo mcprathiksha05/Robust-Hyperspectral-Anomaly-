@@ -171,3 +171,24 @@ def test_compare_methods_table():
     rows = compare_methods(cube, gt, variants={"RX": dict(detectors=("rx",)),
                                                "Fusion": dict(detectors=("rx", "spatial"))}, base=FAST)
     assert [r["method"] for r in rows] == ["RX", "Fusion"] and all(r["roc_auc"] > 0.9 for r in rows)
+
+
+# --------------------------------------------------------------- camouflage
+def test_camouflage_implants_and_muufl_masks():
+    from src.data_loading.camouflage import implant_targets, muufl_target_masks, remove_anomalies
+    cube, gt = make_scene(60, 60)
+    clean = remove_anomalies(cube, gt)
+    assert np.isfinite(clean).all()
+    # filled holes keep realistic noise (not artificially smooth)
+    noise = lambda x: np.std(x - x.mean(-1, keepdims=True))
+    assert noise(clean[gt == 1]) > 0.5 * noise(clean[gt == 0])
+    aucs = []
+    for a in (0.1, 0.5, 1.0):
+        new, new_gt, info = implant_targets(cube, gt, abundance=a, n_targets=12, sizes=(2, 3))
+        assert len(info["targets"]) == 12 and new_gt.sum() == info["n_target_pixels"]
+        aucs.append(score_metrics(RXDetector(robust=False).fit_score(new), new_gt)["roc_auc"])
+    assert aucs[0] < aucs[1] < aucs[2] and aucs[2] > 0.95     # stronger target -> easier
+    m, halo = muufl_target_masks([5, 20, 40], [5, 20, 40], [1.0, 3.0, 6.0], (60, 60))
+    assert m.sum() == 1 + 9 and halo.sum() > m.sum()            # 6 m calibration cloth excluded
+    m_all, _ = muufl_target_masks([5, 20, 40], [5, 20, 40], [1.0, 3.0, 6.0], (60, 60), include_calibration=True)
+    assert m_all.sum() == 1 + 9 + 60

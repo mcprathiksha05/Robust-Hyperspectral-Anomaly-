@@ -1,7 +1,8 @@
 """Benchmark every method variant on every bundled dataset (Task 20: model comparison + ablation).
 
 Run from the repo root:
-    python experiments/run_benchmark.py                 # all datasets
+    python experiments/run_benchmark.py                 # the 16 benchmark datasets
+                                                        # (camouflage sets: run_camouflage_eval.py)
     python experiments/run_benchmark.py --quick         # 3 datasets, for a fast check
 
 Writes:
@@ -51,7 +52,7 @@ def main():
     ap.add_argument("--quick", action="store_true", help="only 3 datasets")
     ap.add_argument("--datasets", nargs="*", help="dataset names (default: all)")
     args = ap.parse_args()
-    names = args.datasets or list_datasets()
+    names = args.datasets or (list_datasets("anomaly") + list_datasets("target"))
     if args.quick:
         names = ["abu-airport-1", "san-diego", "hydice-urban"]
 
